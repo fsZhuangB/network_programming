@@ -330,3 +330,21 @@ setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (void *)&opt, sizeof(opt));
 shutdown在关闭多个文件描述符时，采用全关闭方法
 
 ![Screen Shot 2022-01-16 at 16.55.05](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201161655666.png)
+
+## IO复用
+
+不可取的服务器模型：
+
+对于上面的为每一个请求来建立一个工作线程的服务器模型是不可取的，会浪费大量的服务器资源。
+
+1.   阻塞：
+2.   非阻塞忙轮询
+3.   响应式-多路IO转接
+
+![Screen Shot 2022-01-16 at 20.58.29](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201162058888.png)
+
+## select函数
+
+
+
+
