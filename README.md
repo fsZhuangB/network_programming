@@ -345,6 +345,61 @@ shutdown在关闭多个文件描述符时，采用全关闭方法
 
 ## select函数
 
+1.   nfds参数，监听的所有文件描述符中最大的文件描述符+1。
+2.   监听集合：传入传出参数，监听读，写异常事件，传入有兴趣的监听文件描述符，**传出的是实际有事件发生的**。
+     -   readfds：读文件描述符集合
+     -   writefds：写文件描述符集合（NULL）
+     -   exceptfds：异常文件描述符集合（NULL）
+3.   timeout超时时长，三种情况：
+     1.   NULL永远等下去
+     2.   传入0则为非阻塞，则应该轮询
+     3.   设置timeva>0，等待固定时间
+
+返回值：
+
+大于0，返回所有监听集合中，有发生事件的总数
+
+0，没有满足监听条件的文件描述符
+
+-1，则为异常。
+
+一些辅助的函数：
+
+```c
+void FD_CLR(int fd, fd_set *set)		//把某一个fd清除出去
+int FD_ISSET(int fd, fd_set *set)		//判定某个fd是否在位图中
+void FD_SET(int fd, fd_set *set)		//把某一个fd添加到位图
+void FD_ZERO(fd_set *set)				//位图所有二进制位置零
+```
+
+### 使用的步骤：
+
+```c
+fd_set rset;
+
+```
+
+![](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201182013613.png)
+
+## 多路IO转接服务器设计思路（select函数实现）
+
+多路IO转接服务器也叫做多任务IO服务器。该类服务器实现的主旨思想是，不再由应用程序自己监视客户端连接，取而代之由内核替应用程序监视文件。
+
+思路如下：
+
+![Screen Shot 2022-01-19 at 16.25.57](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201191626009.png)
+
+### select函数优缺点
+
+缺点： 监听上限受文件描述符限制。 最大 1024.
+
+检测满足条件的fd， 需要自己添加业务逻辑提高效率， 提高了编码难度，因为`select`代码里有个可以优化的地方，用数组存下文件描述符，这样就不需要每次扫描一大堆无关文件描述符了。 
+
+优点： **跨平台**。win、linux、macOS、Unix、类Unix、mips
+
+### select实现优化
+
+这里来改进之前代码的问题，因为对于之前的代码，如果最大fd是1023，每次确定有事件发生的fd时，就要扫描3-1023的所有文件描述符，这看起来很蠢。于是定义一个数组，把要监听的文件描述符存下来，每次扫描这个数组就行了。看起来科学得多。
 
 
 
