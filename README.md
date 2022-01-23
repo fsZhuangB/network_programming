@@ -388,6 +388,8 @@ shutdown在关闭多个文件描述符时，采用全关闭方法
 
 ## select函数
 
+
+
 1.   nfds参数，监听的所有文件描述符中最大的文件描述符+1。
 2.   监听集合：传入传出参数，监听读，写异常事件，传入有兴趣的监听文件描述符，**传出的是实际有事件发生的**。
      -   readfds：读文件描述符集合
@@ -431,6 +433,43 @@ fd_set rset;
 思路如下：
 
 ![Screen Shot 2022-01-19 at 16.25.57](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201191626009.png)
+
+```c
+int maxfd = 0;
+lfd = socket(); // 创建套接字
+maxfd = lfd;
+bind();
+listen();
+// 创建两个监听集合, rset作为传入传出参数，all_set作为参数的备份
+fd_set rset, all_set; 
+// 将r监听集合清空
+FD_ZERO(&allset);				
+// 将 lfd 添加至读集合中
+FD_SET(lfd, &allset);
+while (1)
+{
+  rset = all_set;
+  ret = select(maxfd + 1, &rset, NULL, NULL, NULL);
+  // 如果有新的监听事件来临
+  if (ret > 0)
+  {
+    		if (FD_ISSET(lfd, &rset)) {				// 1 在。 0不在。
+          cfd = accept（）；				// 建立连接，返回用于通信的文件描述符
+          maxfd = cfd；
+          FD_SET(cfd, &allset);				// 添加到监听通信描述符集合中。
+			}
+  }
+  // 遍历感兴趣的文件描述符集合，查看哪个有读写事件
+  for （i = lfd+1； i <= 最大文件描述符; i++）{
+				FD_ISSET(i, &rset)				// 有read、write事件
+				read（）
+				// 小 -- 大
+				write();
+			}	
+}
+```
+
+
 
 ### select函数优缺点
 
