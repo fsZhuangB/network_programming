@@ -310,6 +310,7 @@ int main(void)
 3. 如果返回-1， 应进一步判断errno的值：
    1. errno = EAGAIN or EWOULDBLOCK: 设置了**非阻塞方式**读。 没有数据到达，而read函数默认是阻塞读取的。
    2. errno = EINTR 慢速系统调用被中断。补救行为：重新启动。
+   2. errno = ECONNRESET 说明连接被重置，需要close并移除监听队列。
    3. errno = “其他情况” 异常。
 
 ### 慢速系统调用（slow system call）
@@ -388,8 +389,6 @@ shutdown在关闭多个文件描述符时，采用全关闭方法
 
 ## select函数
 
-
-
 1.   nfds参数，监听的所有文件描述符中最大的文件描述符+1。
 2.   监听集合：传入传出参数，监听读，写异常事件，传入有兴趣的监听文件描述符，**传出的是实际有事件发生的**。
      -   readfds：读文件描述符集合
@@ -398,7 +397,7 @@ shutdown在关闭多个文件描述符时，采用全关闭方法
 3.   timeout超时时长，三种情况：
      1.   NULL永远等下去
      2.   传入0则为非阻塞，则应该轮询
-     3.   设置timeva>0，等待固定时间
+     3.   设置timeval>0，等待固定时间
 
 返回值：
 
@@ -469,11 +468,18 @@ while (1)
 }
 ```
 
+select函数的阻塞和非阻塞主要看最后一个参数` timeout`超时时间的值，`timeout`的取值决定了select的状态：
 
+1、timeout传入NULL，则select为阻塞状态，即需要等到监视文件描述符集合中某个文件描述符发生变化才会返回；
+----------相当于无穷大的时间，一直等
+2、timeout置为0秒、0微秒，则select为非阻塞状态，不管文件描述符是否有变化，都立刻返回继续执行，文件无变化返回0，有变化返回一个正值；
+3、timeout置为大于0的值，即等待的超时时间，select在timeout时间内阻塞，超时时间之内有事件到来就返回，否则在超时后不管怎样一定返回，返回值同上述。 
+
+而此处的accept和read函数都是不会阻塞的，因为此时在调用时，已经是有事件发生了
 
 ### select函数优缺点
 
-缺点： 监听上限受文件描述符限制。 最大 1024.
+缺点： 监听上限受文件描述符限制。 最大 1024，同时效率低，如果只需要监听3，500，1000个文件描述符，但是需要对所有的文件描述符进行循环，并检测。
 
 检测满足条件的fd， 需要自己添加业务逻辑提高效率， 提高了编码难度，因为`select`代码里有个可以优化的地方，用数组存下文件描述符，这样就不需要每次扫描一大堆无关文件描述符了。 
 
@@ -483,5 +489,259 @@ while (1)
 
 这里来改进之前代码的问题，因为对于之前的代码，如果最大fd是1023，每次确定有事件发生的fd时，就要扫描3-1023的所有文件描述符，这看起来很蠢。于是定义一个数组，把要监听的文件描述符存下来，每次扫描这个数组就行了。看起来科学得多。
 
+## poll函数
+
+函数原型：
+
+ ```c
+ int poll(struct pollfd fds[], nfds_t nfds, int timeout);
+ 
+ fds[]：监听的文件描述符数组
+   struct pollfd {
+     int fd; 待监听文件描述符
+     short events; 待监听的文件描述符对应事件
+     short revents; 传入时给一个0值，如果满足对应事件，返回非0
+   }
+ nfds：实际监听数组监听个数
+ timeout：>0 超时时长，单位为毫秒
+   			 -1 阻塞等待
+   			  0 不阻塞
+ 返回值：返回满足监听事件的文件描述符的总个数
+ ```
+
+### 实现思路分析
+
+![Screen Shot 2022-01-23 at 16.55.48](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201231656160.png)
+
+## 突破1024文件描述符限制
+
+当前计算机所能打开的最大文件个数。 受硬件影响：
+
+```c
+➜  ClassicNS git:(dev) ✗ cat /proc/sys/fs/file-max 
+183329
+```
+
+当前用户下的进程，默认打开文件描述符个数。  缺省为 1024：
+
+```c
+ulimit -a
+```
+
+修改：
+
+​    打开 sudo vi /etc/security/limits.conf， 写入：
+
+​    \* soft nofile 65536     --> 设置默认值， 可以直接借助命令修改。 【注销用户，使其生效】
+
+​    \* hard nofile 100000    --> 命令修改上限
+
+## epoll实现多路IO转接
+
+### 基础API
+
+1.    epoll_create，创建一个epoll句柄，参数size用来告诉内核监听的文件描述符的个数，跟内存大小有关，供内核参考。
+
+     ```c
+     	#include <sys/epoll.h>
+     	int epoll_create(int size)		size：监听数目
+       返回值：指向新创建的红黑树的根节点的fd
+     ```
+
+2.   epoll_ctl，控制某个epoll监控的文件描述符上的事件：注册、修改、删除。
+
+     ```c
+     	#include <sys/epoll.h>
+     	int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
+     		epfd：	为epoll_creat的句柄
+     		op：		表示动作，用3个宏来表示：
+     			EPOLL_CTL_ADD (注册新的fd到epfd)，
+     			EPOLL_CTL_MOD (修改已经注册的fd的监听事件)，
+     			EPOLL_CTL_DEL (从epfd删除一个fd)；
+     		event：	告诉内核需要监听的事件，本质是一个epoll_event类型的结构体
+         fd：待监听的fd
+     
+     		struct epoll_event {
+     			__uint32_t events; /* Epoll events */
+     			epoll_data_t data; /* User data variable */
+     		};
+     		typedef union epoll_data {
+     			void *ptr;
+     			int fd;
+     			uint32_t u32;
+     			uint64_t u64;
+     		} epoll_data_t;
+     
+     events取值：
+     		EPOLLIN ：	表示对应的文件描述符可以读（包括对端SOCKET正常关闭）
+     		EPOLLOUT：	表示对应的文件描述符可以写
+     		EPOLLPRI：	表示对应的文件描述符有紧急的数据可读（这里应该表示有带外数据到来）
+     data：
+       	int fd：传出参数，对应监听事件的fd
+       	void *ptr：泛型指针
+       	u32，u64不用
+     返回值：
+       成功0，失败-1，设置相应的errno
+     ```
+
+3.   epoll_wait阻塞监听：
+
+     ```c
+     	int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
+         epfd：epoll_create函数返回值
+     		events：		传出参数，传出满足监听条件的fd结构体，这是一个数组
+     		maxevents：	告之内核这个events有多大，这个maxevents的值不能大于创建epoll_create()时的size，是数组元素的总个数：struct epoll_event evnets[1024]
+     		timeout：	是超时时间
+     			-1：	阻塞
+     			0：	立即返回，非阻塞
+     			>0：	指定毫秒
+     		返回值：	成功返回有多少文件描述符就绪，可以用作循环的上限，
+         				 时间到时，没有fd满足监听事件返回0
+         				 出错返回-1
+     ```
+
+     events：
+
+![Screen Shot 2022-01-24 at 16.02.06](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201241602150.png)
 
 
+
+### 实现
+
+```c
+// epoll实现IO多路转接
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <strings.h>
+#include <errno.h>
+#include <sys/select.h>
+#include <sys/epoll.h>
+#include <ctype.h>
+#define SERV_PORT 1234
+#define BUFF_SIZE 1024
+#define MAX_CON 5000
+void sys_err(const char* s)
+{
+    perror(s);
+    exit(1);
+}
+
+int main(void)
+{
+     int lfd, cfd;
+    int ret,n;
+    char buffer[BUFF_SIZE];
+    struct sockaddr_in serv_addr, cli_addr;
+    socklen_t cli_addr_len;
+    // socket函数调用
+    lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd == -1)
+    { sys_err("wrong socket\n"); }
+    int opt = 1;  
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    bzero((void*)&serv_addr, sizeof(serv_addr));
+    serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(SERV_PORT);
+
+    ret = bind(lfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
+    if (ret == -1)
+    { sys_err("wrong socket\n"); }
+
+    ret = listen(lfd, 128);
+    if (ret == -1)
+    { sys_err("wrong socket\n"); }
+
+    struct epoll_event tep, ep[MAX_CON];
+    int efd = epoll_create(MAX_CON);
+    if (efd == -1)
+    { sys_err("epoll_create wrong\n");}
+    tep.events = EPOLLIN;
+    tep.data.fd = lfd;
+    // 暂时用不到tep.data.ptr
+    int res = epoll_ctl(efd, EPOLL_CTL_ADD, lfd, &tep);
+    if (res == -1)
+    { sys_err("wrong epoll ctl\n");}
+
+    int i, j;
+    while (1)
+    {
+        // 设置为阻塞
+        int nready = epoll_wait(efd, ep, MAX_CON, -1);
+        if (nready == -1)
+        { sys_err("epoll_wait error\n"); }
+        for (i = 0; i < nready; ++i)
+        {
+            // 如果不是EPOLLIN事件
+            if ( !(ep[i].events & EPOLLIN))
+            {
+                continue;
+            }
+            if (ep[i].data.fd == lfd)
+            {
+                cli_addr_len = sizeof(cli_addr);
+                cfd = accept(lfd, (struct sockaddr*)&cli_addr, &cli_addr_len);
+                tep.events = EPOLLIN;
+                tep.data.fd = cfd;
+                res = epoll_ctl(efd, EPOLL_CTL_ADD, cfd, &tep);
+                if (res == -1)
+                { sys_err("epoll_ctl error\n"); }
+            }
+            // 如果不是连接事件而是读写事件
+            else
+            {
+                int sockfd = ep[i].data.fd;
+                n = read(sockfd, buffer, sizeof(buffer));
+                // 如果读到n==0，说明对端关闭
+                if (n == 0)
+                {
+                    res = epoll_ctl(efd, EPOLL_CTL_DEL, sockfd, NULL);
+                    if (res < 0)
+                    { sys_err("epoll_ctl error");}
+                    close(sockfd);
+                }
+                // 出错
+                else if (n < 0)
+                {
+                    sys_err("read_error\n");
+                    res = epoll_ctl(efd, EPOLL_CTL_DEL, sockfd, NULL);
+                    if (res < 0)
+                    { sys_err("epoll_ctl error");}
+                    close(sockfd);
+                }
+                else
+                {
+                    for (j = 0; j <  n; ++j)
+                    {
+                        buffer[j] = toupper(buffer[j]);
+                    }
+                    write(sockfd, buffer, n);
+                    write(STDOUT_FILENO, buffer,n);
+                }
+            }
+        }
+
+    }
+    close(lfd);
+
+}
+```
+
+
+
+优点：
+
+​    自带数组结构。 可以将 监听事件集合 和 返回事件集合 分离。
+
+​    拓展 监听上限。 超出 1024限制。 
+
+缺点：
+
+​    不能跨平台。 Linux 
+
+​    无法直接定位满足监听事件的文件描述符， 编码难度较大。
