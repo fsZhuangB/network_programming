@@ -538,6 +538,8 @@ ulimit -a
 
 ## epoll实现多路IO转接
 
+epoll是Linux下多路复用IO接口select/poll的增强版本，**它能显著提高程序在大量并发连接中只有少量活跃的情况下的系统CPU利用率，因为它会复用文件描述符集合来传递结果而不用迫使开发者每次等待事件之前都必须重新准备要被侦听的文件描述符集合**，另一点原因就是获取事件的时候，**它无须遍历整个被侦听的描述符集，只要遍历那些被内核IO事件异步唤醒而加入Ready队列的描述符集合就行了**。
+
 ### 基础API
 
 1.    epoll_create，创建一个epoll句柄，参数size用来告诉内核监听的文件描述符的个数，跟内存大小有关，供内核参考。
@@ -610,17 +612,7 @@ ulimit -a
 
 ```c
 // epoll实现IO多路转接
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <strings.h>
-#include <errno.h>
-#include <sys/select.h>
-#include <sys/epoll.h>
-#include <ctype.h>
+
 #define SERV_PORT 1234
 #define BUFF_SIZE 1024
 #define MAX_CON 5000
@@ -657,6 +649,8 @@ int main(void)
     if (ret == -1)
     { sys_err("wrong socket\n"); }
 
+  	// tep用来设置单个结构体属性
+  	// ep用来作为epoll_wait传出的数组
     struct epoll_event tep, ep[MAX_CON];
     int efd = epoll_create(MAX_CON);
     if (efd == -1)
@@ -732,16 +726,101 @@ int main(void)
 }
 ```
 
+## epoll事件模型
+
+EPOLL事件有两种模型：
+
+-   Edge Triggered (ET) 边缘触发只有数据到来才触发，不管缓存区中是否还有数据。
+
+-   Level Triggered (LT) 水平触发只要有数据都会触发。
+
+    ![Screen Shot 2022-01-26 at 11.48.28](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201261148529.png)
+
+思考如下步骤：
+
+1.   假定我们已经把一个用来从管道中读取数据的文件描述符(RFD)添加到epoll描述符。
+
+2.   管道的另一端写入了2KB的数据
+
+3.   调用epoll_wait，并且它会返回RFD，说明它已经准备好读取操作
+
+4.   读取1KB的数据
+
+5.   调用epoll_wait……
+
+在这个过程中，有两种工作模式：
+
+### ET模式
+
+边缘触发只捕捉上升沿，缓冲区中未读完的数据不会导致epoll_wait返回。
+
+```c
+struct epoll_event event;
+event.events = EPOLLIN | EPOLLET
+```
 
 
-优点：
 
-​    自带数组结构。 可以将 监听事件集合 和 返回事件集合 分离。
+### LT模式
 
-​    拓展 监听上限。 超出 1024限制。 
+水平触发只要有数据都触发，属于默认状态，缓冲区中未读完的数据会导致epoll_wait返回。
 
-缺点：
 
-​    不能跨平台。 Linux 
 
-​    无法直接定位满足监听事件的文件描述符， 编码难度较大。
+### 示例一：基于管道的例子
+
+### 示例二：基于套接字的例子
+
+
+
+## epoll的ET非阻塞模式
+
+思考下面一种场景：
+
+
+
+ET只支持非阻塞模式，利用fcntl来设置，在读数据的时候进行设置：
+
+```c
+flag = fcntl(connfd, F_GETFL);          /* 修改connfd为非阻塞读 */  
+flag |= O_NONBLOCK;  
+fcntl(connfd, F_SETFL, flag);  
+```
+
+## epoll优缺点
+
+优点：高效，突破1024文件描述符限制。
+
+缺点：不能跨平台，只有linux平台，libevent对epoll进行了一定的封装。
+
+## epoll反应堆模型
+
+epoll反应堆模型的机制主要是reactor模式，可以看这个了解一下：[如何深刻理解Reactor和Proactor？](https://www.zhihu.com/question/26943938)
+
+ET模式+非阻塞，轮询+`void*ptr`
+
+反应堆模式：不但要监听 cfd 的读事件、还要监听cfd的写事件，应该判断文件描述符可写，才能再写。
+
+过程：
+
+socket、bind、listen -- epoll_create 创建监听 红黑树 -- 返回 epfd -- epoll_ctl() 向树上添加一个监听fd -- while（1）--  -- epoll_wait 监听 -- 对应监听fd有事件产生 -- 返回 监听满足数组。 -- 判断返回数组元素 -- lfd满足 -- Accept -- cfd 满足 -- read() --- 小->大 -- cfd从监听红黑树上摘下 -- EPOLLOUT -- 回调函数 -- epoll_ctl() -- EPOLL_CTL_ADD 重新放到红黑上监听写事件 -- **等待 epoll_wait 返回 -- 说明 cfd 可写** -- write回去 -- cfd从监听红黑树上摘下 -- EPOLLIN -- epoll_ctl() -- EPOLL_CTL_ADD 重新放到红黑上监听读事件 -- epoll_wait 监听
+
+为何需要epoll反应堆：
+
+加入IO转接之后，有了事件，server才去处理，这里反应堆也是这样，由于网络环境复杂，服务器处理数据之后，可能并不能直接写回去，比如遇到网络繁忙或者对方缓冲区已经满了这种情况，就不能直接写回给客户端。反应堆就是在处理数据之后，监听写事件，能写会客户端了，才去做写回操作。写回之后，再改为监听读事件。如此循环。
+
+### epoll反应堆main函数逻辑
+
+![Screen Shot 2022-01-27 at 19.01.15](/Users/fszhuangb/Library/Application Support/typora-user-images/Screen Shot 2022-01-27 at 19.01.15.png)
+
+last_active指活跃值，超过一定时间就踢出去
+
+
+
+如果有读就绪，则调用回调函数，进行读 
+
+![Screen Shot 2022-01-27 at 19.09.42](/Users/fszhuangb/Library/Application Support/typora-user-images/Screen Shot 2022-01-27 at 19.09.42.png)
+
+上来先用了最后一个作为lfd地址 
+
+![Screen Shot 2022-01-27 at 19.22.54](/Users/fszhuangb/Library/Application Support/typora-user-images/Screen Shot 2022-01-27 at 19.22.54.png)
