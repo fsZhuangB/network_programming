@@ -811,7 +811,7 @@ socket、bind、listen -- epoll_create 创建监听 红黑树 -- 返回 epfd -- 
 
 ### epoll反应堆main函数逻辑
 
-![Screen Shot 2022-01-27 at 19.01.15](/Users/fszhuangb/Library/Application Support/typora-user-images/Screen Shot 2022-01-27 at 19.01.15.png)
+![Screen Shot 2022-01-27 at 19.01.15](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201291721224.png)
 
 last_active指活跃值，超过一定时间就踢出去
 
@@ -819,8 +819,39 @@ last_active指活跃值，超过一定时间就踢出去
 
 如果有读就绪，则调用回调函数，进行读 
 
-![Screen Shot 2022-01-27 at 19.09.42](/Users/fszhuangb/Library/Application Support/typora-user-images/Screen Shot 2022-01-27 at 19.09.42.png)
+![Screen Shot 2022-01-27 at 19.09.42](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201291720476.png)
 
 上来先用了最后一个作为lfd地址 
 
-![Screen Shot 2022-01-27 at 19.22.54](/Users/fszhuangb/Library/Application Support/typora-user-images/Screen Shot 2022-01-27 at 19.22.54.png)
+![Screen Shot 2022-01-27 at 19.22.54](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201291720246.png)
+
+在网络编程中：recv--read
+
+​					sent--write
+
+
+
+## 线程池
+
+提前创建好一堆线程，减少创建和销毁的开销。
+
+![Screen Shot 2022-01-29 at 17.59.37](https://raw.githubusercontent.com/fsZhuangB/Photos_Of_Blog/master/photos/202201291759116.png)需要：任务队列、条件变量，锁
+
+线程池扩容
+
+管理线程，用来管理线程池，用来扩容和瘦身
+
+### main函数分析
+
+1.   创建线程池threadpool_create
+2.   向线程池添加任务，借助回调函数处理任务
+3.   销毁线程池
+
+### pthreadpool_create函数分析
+
+### 工作线程函数分析
+
+
+
+### 管理者线程分析
+
